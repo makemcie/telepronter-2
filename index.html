@@ -1044,36 +1044,55 @@ html.standalone #installCard { display: none !important; }
       autoGainControl: true,
     };
     const facingExact = wantUser ? "user" : "environment";
-    const attempts = [
-      {
-        video: {
-          facingMode: { exact: facingExact },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-          frameRate: { ideal: 30 },
-        },
-        audio: audioOpts,
-      },
-      {
-        video: {
-          facingMode: { exact: facingExact },
-          width: { ideal: 1080 },
-          height: { ideal: 1920 },
-          frameRate: { ideal: 30 },
-        },
-        audio: audioOpts,
-      },
-      {
-        video: {
-          facingMode: facingExact,
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-        },
-        audio: true,
-      },
-      { video: { facingMode: facingExact }, audio: true },
-      { video: true, audio: true },
-    ];
+    const attempts = wantUser
+      ? [
+          {
+            video: {
+              facingMode: { exact: "user" },
+              aspectRatio: { ideal: 3 / 4 },
+              width: { ideal: 1440 },
+              height: { ideal: 1920 },
+            },
+            audio: audioOpts,
+          },
+          {
+            video: {
+              facingMode: { exact: "user" },
+              aspectRatio: { ideal: 3 / 4 },
+              width: { ideal: 960 },
+              height: { ideal: 1280 },
+            },
+            audio: audioOpts,
+          },
+          {
+            video: { facingMode: { exact: "user" }, aspectRatio: { ideal: 4 / 3 } },
+            audio: audioOpts,
+          },
+          { video: { facingMode: { exact: "user" } }, audio: audioOpts },
+          { video: { facingMode: "user" }, audio: true },
+        ]
+      : [
+          {
+            video: {
+              facingMode: { exact: "environment" },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
+              frameRate: { ideal: 30 },
+            },
+            audio: audioOpts,
+          },
+          {
+            video: {
+              facingMode: { exact: "environment" },
+              width: { ideal: 1080 },
+              height: { ideal: 1920 },
+              frameRate: { ideal: 30 },
+            },
+            audio: audioOpts,
+          },
+          { video: { facingMode: "environment" }, audio: true },
+          { video: true, audio: true },
+        ];
 
     let stream = null;
     let lastErr = null;
@@ -1112,7 +1131,8 @@ html.standalone #installCard { display: none !important; }
       }
     }
 
-    await forcePortraitTrack(stream);
+    if (!wantUser) await forcePortraitTrack(stream);
+    else await widenFrontTrack(stream);
     await relaxZoom(stream);
     attachVideos();
     updateStatus();
@@ -1130,6 +1150,24 @@ html.standalone #installCard { display: none !important; }
       });
     } catch {
       /* keep native */
+    }
+  }
+
+  async function widenFrontTrack(stream) {
+    const track = stream && stream.getVideoTracks()[0];
+    if (!track || !track.applyConstraints) return;
+    const tries = [
+      { aspectRatio: 3 / 4, width: { ideal: 1440 }, height: { ideal: 1920 } },
+      { aspectRatio: 3 / 4 },
+      { aspectRatio: 4 / 3 },
+    ];
+    for (const c of tries) {
+      try {
+        await track.applyConstraints(c);
+        break;
+      } catch {
+        /* next */
+      }
     }
   }
 
@@ -1176,8 +1214,7 @@ html.standalone #installCard { display: none !important; }
     v.style.width = "100%";
     v.style.height = "100%";
     v.style.margin = "0";
-    const portraitSrc = (v.videoHeight || 0) >= (v.videoWidth || 1);
-    v.style.objectFit = portraitSrc ? "cover" : "contain";
+    v.style.objectFit = state.mainIsRear ? "cover" : "contain";
     v.style.objectPosition = "center center";
     v.style.background = "#000";
     v.style.transform = state.mainIsRear ? "none" : "scaleX(-1)";
@@ -1423,8 +1460,7 @@ html.standalone #installCard { display: none !important; }
     ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, w, h);
     if (!vw || !vh) return;
-    const portraitSrc = vh >= vw;
-    const scale = portraitSrc ? Math.max(w / vw, h / vh) : Math.min(w / vw, h / vh);
+    const scale = state.mainIsRear ? Math.max(w / vw, h / vh) : Math.min(w / vw, h / vh);
     const dw = vw * scale;
     const dh = vh * scale;
     const dx = (w - dw) / 2;
@@ -1973,6 +2009,7 @@ html.standalone #installCard { display: none !important; }
 
   init();
 })();
+
 
 
 
