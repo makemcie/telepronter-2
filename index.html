@@ -645,6 +645,22 @@ html.standalone #installCard { display: none !important; }
   min-width: 28px;
   font-size: 12px;
 }
+
+.countdown {
+  position: absolute;
+  inset: 0;
+  z-index: 26;
+  display: grid;
+  place-items: center;
+  font-size: 118px;
+  font-weight: 700;
+  color: #fff;
+  text-shadow: 0 10px 32px rgba(0,0,0,.55);
+  pointer-events: none;
+}
+.countdown.hidden { display: none !important; }
+.prompter-body { touch-action: none; }
+
 </style>
 </head>
 <body>
@@ -673,6 +689,8 @@ html.standalone #installCard { display: none !important; }
       </div>
     </div>
 
+    
+      <div id="countdown" class="countdown hidden" aria-hidden="true">3</div>
     <div class="topbar">
       <div class="brand">
         <strong>DualCam Teleprompter</strong>
@@ -890,6 +908,8 @@ html.standalone #installCard { display: none !important; }
     recChunkIndex: 0,
     usingIdb: false,
     persistQueue: Promise.resolve(),
+    countingDown: false,
+    countTimer: null,
     script: "Hola, soy el teleprompter.\n\nEscribe aquí tu guion para leerlo mientras grabas.\n\nPuedes cambiar color, tamaño y velocidad del texto.",
   };
 
@@ -998,23 +1018,43 @@ html.standalone #installCard { display: none !important; }
     if (els.pipVideo) els.pipVideo.srcObject = null;
     if (els.mainVideo) els.mainVideo.srcObject = null;
 
+    stopStream(state.audioStream);
+    state.audioStream = null;
+
     const q = QUALITY[state.quality] || QUALITY.fhd;
     const wantUser = facing === "user";
+    const portrait = window.innerHeight >= window.innerWidth;
+    const idealW = portrait ? q.height : q.width;
+    const idealH = portrait ? q.width : q.height;
+    const audioOpts = {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    };
     const attempts = [
       {
         video: {
           facingMode: { exact: wantUser ? "user" : "environment" },
-          width: { ideal: q.width },
-          height: { ideal: q.height },
-          frameRate: { ideal: q.fps, max: 30 },
+          width: { ideal: idealW, min: 720 },
+          height: { ideal: idealH, min: 720 },
+          frameRate: { ideal: 30 },
         },
-        audio: false,
+        audio: audioOpts,
+      },
+      {
+        video: {
+          facingMode: { exact: wantUser ? "user" : "environment" },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          frameRate: { ideal: 30 },
+        },
+        audio: audioOpts,
       },
       {
         video: { facingMode: wantUser ? "user" : "environment" },
-        audio: false,
+        audio: true,
       },
-      { video: true, audio: false },
+      { video: true, audio: true },
     ];
 
     let stream = null;
@@ -1042,28 +1082,46 @@ html.standalone #installCard { display: none !important; }
 
     state.rearStream = stream;
     state.frontStream = null;
-
-    if (!state.audioStream || state.audioStream.getAudioTracks().every((t) => t.readyState !== "live")) {
+    if (stream.getAudioTracks().length) {
+      state.audioStream = stream;
+    } else {
       try {
-        state.audioStream = await getStream({
-          audio: {
-            echoCancellation: { ideal: true },
-            noiseSuppression: { ideal: true },
-            autoGainControl: { ideal: true },
-          },
-          video: false,
-        });
+        const mic = await getStream({ audio: audioOpts, video: false });
+        mic.getAudioTracks().forEach((t) => stream.addTrack(t));
+        state.audioStream = stream;
       } catch {
-        try {
-          state.audioStream = await getStream({ audio: true, video: false });
-        } catch {
-          state.audioStream = null;
-        }
+        state.audioStream = null;
       }
     }
 
+    await boostVideoQuality(stream);
     attachVideos();
     updateStatus();
+  }
+
+  async function boostVideoQuality(stream) {
+    const track = stream && stream.getVideoTracks()[0];
+    if (!track || !track.applyConstraints) return;
+    const q = QUALITY[state.quality] || QUALITY.fhd;
+    const portrait = window.innerHeight >= window.innerWidth;
+    const tries = portrait
+      ? [
+          { width: { ideal: 1080 }, height: { ideal: 1920 }, frameRate: { ideal: 30 } },
+          { width: { ideal: 720 }, height: { ideal: 1280 }, frameRate: { ideal: 30 } },
+        ]
+      : [
+          { width: { ideal: q.width }, height: { ideal: q.height }, frameRate: { ideal: 30 } },
+          { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
+        ];
+    for (const c of tries) {
+      try {
+        await track.applyConstraints(c);
+        const s = track.getSettings ? track.getSettings() : {};
+        if ((s.width || 0) >= 720 || (s.height || 0) >= 720) break;
+      } catch {
+        /* next */
+      }
+    }
   }
 
   function attachVideos() {
@@ -1092,7 +1150,10 @@ html.standalone #installCard { display: none !important; }
     const res = s.width && s.height ? `${s.width}x${s.height}` : QUALITY[state.quality].label;
     const camName = state.mainIsRear ? "Trasera" : "Frontal";
     els.camStatus.textContent = `${camName} · ${res}`;
-    const hasMic = Boolean(state.audioStream && state.audioStream.getAudioTracks().length);
+    const hasMic = Boolean(
+      (state.rearStream && state.rearStream.getAudioTracks().some((t) => t.enabled && t.readyState === "live")) ||
+      (state.audioStream && state.audioStream.getAudioTracks().some((t) => t.readyState === "live"))
+    );
     els.dualStatus.textContent = `1 cámara · ${hasMic ? "mic ON" : "sin mic"}`;
     els.dualStatus.classList.remove("live");
   }
@@ -1150,15 +1211,13 @@ html.standalone #installCard { display: none !important; }
     const max = maxScroll();
     if (state.scrollPx >= max) {
       state.scrollPx = max;
-      els.prompterText.style.webkitTransform = `translateY(${-state.scrollPx}px)`;
-      els.prompterText.style.transform = `translateY(${-state.scrollPx}px)`;
+      applyScrollPos();
       state.scrolling = false;
       els.playBtn.textContent = "Leer";
       toast("Guion terminado");
       return;
     }
-    els.prompterText.style.webkitTransform = `translateY(${-state.scrollPx}px)`;
-    els.prompterText.style.transform = `translateY(${-state.scrollPx}px)`;
+    applyScrollPos();
     requestAnimationFrame(tickScroll);
   }
 
@@ -1166,7 +1225,7 @@ html.standalone #installCard { display: none !important; }
     state.scrolling = false;
     state.scrollPx = 0;
     state.lastTs = 0;
-    els.prompterText.style.transform = "translateY(0px)";
+    applyScrollPos();
     els.playBtn.textContent = "Leer";
   }
 
@@ -1290,18 +1349,71 @@ html.standalone #installCard { display: none !important; }
   }
 
   function buildRecordStream() {
-    const videoStream = state.mainIsRear
-      ? state.rearStream
-      : state.frontStream || state.rearStream;
+    const videoStream = state.rearStream || state.frontStream;
     const combined = new MediaStream();
-    videoStream.getVideoTracks().forEach((t) => combined.addTrack(t));
-    if (state.audioStream) {
+    if (videoStream) {
+      videoStream.getVideoTracks().forEach((t) => combined.addTrack(t));
+      videoStream.getAudioTracks().forEach((t) => combined.addTrack(t));
+    }
+    if (!combined.getAudioTracks().length && state.audioStream && state.audioStream !== videoStream) {
       state.audioStream.getAudioTracks().forEach((t) => combined.addTrack(t));
     }
     return combined;
   }
 
+  function cancelCountdown() {
+    state.countingDown = false;
+    clearTimeout(state.countTimer);
+    const el = document.getElementById("countdown");
+    if (el) el.classList.add("hidden");
+  }
+
+  function runCountdown(seconds) {
+    return new Promise((resolve) => {
+      const el = document.getElementById("countdown");
+      state.countingDown = true;
+      let left = seconds;
+      const step = () => {
+        if (!state.countingDown) {
+          if (el) el.classList.add("hidden");
+          resolve(false);
+          return;
+        }
+        if (left <= 0) {
+          if (el) el.classList.add("hidden");
+          state.countingDown = false;
+          resolve(true);
+          return;
+        }
+        if (el) {
+          el.textContent = String(left);
+          el.classList.remove("hidden");
+        }
+        left -= 1;
+        state.countTimer = setTimeout(step, 1000);
+      };
+      step();
+    });
+  }
+
+  function stopTextScroll() {
+    state.scrolling = false;
+    state.lastTs = 0;
+    if (els.playBtn) els.playBtn.textContent = "Leer";
+  }
+
+  function applyScrollPos() {
+    const y = -state.scrollPx;
+    els.prompterText.style.webkitTransform = `translateY(${y}px)`;
+    els.prompterText.style.transform = `translateY(${y}px)`;
+  }
+
   async function toggleRecord() {
+    if (state.countingDown) {
+      cancelCountdown();
+      toast("Conteo cancelado");
+      return;
+    }
     if (state.recording) {
       stopRecording();
       return;
@@ -1310,22 +1422,22 @@ html.standalone #installCard { display: none !important; }
       toast("Este navegador no puede grabar video.");
       return;
     }
+    const ok = await runCountdown(3);
+    if (!ok) return;
+    await beginRecording();
+  }
+
+  async function beginRecording() {
     let stream = buildRecordStream();
     if (!stream.getVideoTracks().length) {
       toast("No hay video para grabar.");
       return;
     }
-    if (!state.audioStream || !state.audioStream.getAudioTracks().some((t) => t.readyState === "live")) {
+    if (!stream.getAudioTracks().some((t) => t.readyState === "live")) {
       try {
-        state.audioStream = await getStream({
-          audio: {
-            echoCancellation: { ideal: true },
-            noiseSuppression: { ideal: true },
-            autoGainControl: { ideal: true },
-          },
-          video: false,
-        });
-        stream = buildRecordStream();
+        const mic = await getStream({ audio: true, video: false });
+        mic.getAudioTracks().forEach((t) => stream.addTrack(t));
+        state.audioStream = stream;
       } catch {
         toast("Se grabará sin micrófono. Revisa el permiso de voz.");
       }
@@ -1376,7 +1488,7 @@ html.standalone #installCard { display: none !important; }
     tickRecTimer();
     requestWakeLock();
     if (!state.scrolling) toggleScroll();
-    toast("Grabando. El guion se mueve solo. Swap es frontal o trasera.");
+    toast("Grabando con audio.");
   }
 
   function tickRecTimer() {
@@ -1395,6 +1507,8 @@ html.standalone #installCard { display: none !important; }
   }
 
   function stopRecording() {
+    stopTextScroll();
+    cancelCountdown();
     if (!state.recorder) return;
     try {
       if (state.recorder.state !== "inactive") state.recorder.stop();
@@ -1479,6 +1593,39 @@ html.standalone #installCard { display: none !important; }
     }
     downloadLastFile();
     toast("Archivo descargado. En Android suele aparecer en Galería o Descargas.");
+  }
+
+  function bindScriptScrub() {
+    const body = els.prompter && els.prompter.querySelector(".prompter-body");
+    if (!body) return;
+    let lastY = null;
+    let dragging = false;
+    const start = (y) => {
+      if (state.recording || state.countingDown) return;
+      if (state.scrolling) stopTextScroll();
+      lastY = y;
+      dragging = true;
+    };
+    const move = (y, ev) => {
+      if (!dragging || lastY == null) return;
+      const dy = lastY - y;
+      lastY = y;
+      state.scrollPx = Math.max(0, Math.min(maxScroll(), state.scrollPx + dy));
+      applyScrollPos();
+      if (ev && ev.cancelable) ev.preventDefault();
+    };
+    const end = () => {
+      dragging = false;
+      lastY = null;
+    };
+    body.addEventListener("touchstart", (e) => start(e.touches[0].clientY), { passive: true });
+    body.addEventListener("touchmove", (e) => move(e.touches[0].clientY, e), { passive: false });
+    body.addEventListener("touchend", end);
+    body.addEventListener("mousedown", (e) => start(e.clientY));
+    window.addEventListener("mousemove", (e) => {
+      if (dragging) move(e.clientY, e);
+    });
+    window.addEventListener("mouseup", end);
   }
 
   function makeDraggable(el, handle) {
@@ -1685,6 +1832,7 @@ html.standalone #installCard { display: none !important; }
     makeDraggable(els.prompter, document.getElementById("dragPrompter"));
     makeResizable(els.prompter, document.getElementById("resizePrompter"));
     makeDraggable(els.pip);
+    bindScriptScrub();
 
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible" && state.scrolling) requestWakeLock();
@@ -1704,6 +1852,7 @@ html.standalone #installCard { display: none !important; }
 
   init();
 })();
+
 
 
   </script>
