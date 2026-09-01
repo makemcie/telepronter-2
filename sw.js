@@ -1,4 +1,4 @@
-const CACHE = "teleprompter-app-v7";
+const CACHE = "teleprompter-app-v9";
 const PRECACHE = [
   "./",
   "./index.html",
