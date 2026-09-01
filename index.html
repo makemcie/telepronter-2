@@ -1038,39 +1038,30 @@ html.standalone #installCard { display: none !important; }
 
     const q = QUALITY[state.quality] || QUALITY.fhd;
     const wantUser = facing === "user";
-    const portrait = window.innerHeight >= window.innerWidth;
-    const idealW = portrait ? q.height : q.width;
-    const idealH = portrait ? q.width : q.height;
     const audioOpts = {
       echoCancellation: true,
       noiseSuppression: true,
       autoGainControl: true,
     };
-    const attempts = [
-      {
-        video: {
-          facingMode: { exact: wantUser ? "user" : "environment" },
-          width: { ideal: idealW, min: 720 },
-          height: { ideal: idealH, min: 720 },
-          frameRate: { ideal: 30 },
-        },
-        audio: audioOpts,
-      },
-      {
-        video: {
-          facingMode: { exact: wantUser ? "user" : "environment" },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-          frameRate: { ideal: 30 },
-        },
-        audio: audioOpts,
-      },
-      {
-        video: { facingMode: wantUser ? "user" : "environment" },
-        audio: true,
-      },
-      { video: true, audio: true },
-    ];
+    const attempts = wantUser
+      ? [
+          { video: { facingMode: { exact: "user" } }, audio: audioOpts },
+          { video: { facingMode: "user" }, audio: true },
+          { video: true, audio: true },
+        ]
+      : [
+          {
+            video: {
+              facingMode: { exact: "environment" },
+              width: { ideal: q.width },
+              height: { ideal: q.height },
+              frameRate: { ideal: 30 },
+            },
+            audio: audioOpts,
+          },
+          { video: { facingMode: "environment" }, audio: true },
+          { video: true, audio: true },
+        ];
 
     let stream = null;
     let lastErr = null;
@@ -1109,7 +1100,8 @@ html.standalone #installCard { display: none !important; }
       }
     }
 
-    await boostVideoQuality(stream);
+    if (!wantUser) await boostVideoQuality(stream);
+    await relaxZoom(stream);
     attachVideos();
     updateStatus();
   }
@@ -1118,25 +1110,61 @@ html.standalone #installCard { display: none !important; }
     const track = stream && stream.getVideoTracks()[0];
     if (!track || !track.applyConstraints) return;
     const q = QUALITY[state.quality] || QUALITY.fhd;
-    const portrait = window.innerHeight >= window.innerWidth;
-    const tries = portrait
-      ? [
-          { width: { ideal: 1080 }, height: { ideal: 1920 }, frameRate: { ideal: 30 } },
-          { width: { ideal: 720 }, height: { ideal: 1280 }, frameRate: { ideal: 30 } },
-        ]
-      : [
-          { width: { ideal: q.width }, height: { ideal: q.height }, frameRate: { ideal: 30 } },
-          { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
-        ];
-    for (const c of tries) {
-      try {
-        await track.applyConstraints(c);
-        const s = track.getSettings ? track.getSettings() : {};
-        if ((s.width || 0) >= 720 || (s.height || 0) >= 720) break;
-      } catch {
-        /* next */
-      }
+    try {
+      await track.applyConstraints({
+        width: { ideal: q.width },
+        height: { ideal: q.height },
+        frameRate: { ideal: 30 },
+      });
+    } catch {
+      /* keep native */
     }
+  }
+
+  async function relaxZoom(stream) {
+    const track = stream && stream.getVideoTracks()[0];
+    if (!track || !track.getCapabilities || !track.applyConstraints) return;
+    try {
+      const caps = track.getCapabilities();
+      if (caps.zoom && typeof caps.zoom.min === "number") {
+        await track.applyConstraints({ advanced: [{ zoom: caps.zoom.min }] });
+      }
+    } catch {
+      /* not supported */
+    }
+  }
+
+  function layoutPreview() {
+    const v = els.mainVideo;
+    if (!v) return;
+    const stage = v.parentElement;
+    if (!stage) return;
+    const sw = stage.clientWidth || window.innerWidth;
+    const sh = stage.clientHeight || window.innerHeight;
+    const vw = v.videoWidth || 0;
+    const vh = v.videoHeight || 0;
+    v.style.position = "absolute";
+    v.style.inset = "auto";
+    v.style.margin = "0";
+    v.style.objectFit = "fill";
+    if (!vw || !vh) {
+      v.style.left = "0";
+      v.style.top = "0";
+      v.style.width = "100%";
+      v.style.height = "100%";
+      v.style.objectFit = "contain";
+      v.style.transform = state.mainIsRear ? "none" : "scaleX(-1)";
+      return;
+    }
+    const scale = Math.min(sw / vw, sh / vh);
+    const dw = Math.round(vw * scale);
+    const dh = Math.round(vh * scale);
+    v.style.width = dw + "px";
+    v.style.height = dh + "px";
+    v.style.left = Math.round((sw - dw) / 2) + "px";
+    v.style.top = Math.round((sh - dh) / 2) + "px";
+    v.style.transform = state.mainIsRear ? "none" : "scaleX(-1)";
+    v.style.transformOrigin = "center center";
   }
 
   function attachVideos() {
@@ -1151,8 +1179,10 @@ html.standalone #installCard { display: none !important; }
     els.mainVideo.autoplay = true;
     els.mainVideo.classList.toggle("mirrored", !state.mainIsRear);
     els.mainVideo.classList.toggle("front-cam", !state.mainIsRear);
-    els.mainVideo.style.objectFit = "contain";
-    els.mainVideo.style.objectPosition = "center center";
+    els.mainVideo.onloadedmetadata = () => layoutPreview();
+    layoutPreview();
+    window.removeEventListener("resize", layoutPreview);
+    window.addEventListener("resize", layoutPreview);
     const playMain = els.mainVideo.play();
     if (playMain && playMain.catch) playMain.catch(() => {});
   }
@@ -1926,6 +1956,7 @@ html.standalone #installCard { display: none !important; }
 
   init();
 })();
+
 
 
 
