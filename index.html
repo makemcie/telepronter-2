@@ -117,9 +117,7 @@ button, textarea, input, select {
   transform: scaleX(-1);
 }
 
-.pip.hidden {
-  display: none;
-}
+.pip, #pip, .pip.hidden { display: none !important; }
 
 .pip-label {
   position: absolute;
@@ -628,7 +626,26 @@ html.standalone .app {
 .install-card.hidden { display: none !important; }
 html.standalone #installCard { display: none !important; }
 
-  </style>
+  
+.pip, #pip { display: none !important; }
+.speed-slider-row {
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px 8px;
+}
+.speed-slider-row span {
+  font-size: 12px;
+  color: var(--muted);
+}
+.speed-slider-row input[type="range"] {
+  flex: 1;
+  max-width: 220px;
+}
+.speed-slider-row b {
+  min-width: 28px;
+  font-size: 12px;
+}
+</style>
 </head>
 <body>
   <div class="app">
@@ -668,11 +685,10 @@ html.standalone #installCard { display: none !important; }
     </div>
 
     <div class="dock">
-      <div class="speed-row">
-        <button class="seg" data-speed="24">Lento</button>
-        <button class="seg active" data-speed="42">Medio</button>
-        <button class="seg" data-speed="70">Rápido</button>
-        <button class="seg" data-speed="110">Turbo</button>
+      <div class="speed-row speed-slider-row">
+        <span>Velocidad</span>
+        <input id="dockSpeed" type="range" min="8" max="160" value="42" />
+        <b id="dockSpeedVal">42</b>
       </div>
       <div class="record-row">
         <div class="side-actions">
@@ -969,105 +985,80 @@ html.standalone #installCard { display: none !important; }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       throw new Error("Este navegador no permite usar la cámara. Prueba Chrome o Safari en HTTPS.");
     }
+    await startSingleCamera(state.mainIsRear ? "environment" : "user");
+  }
 
+  async function startSingleCamera(facing) {
     stopStream(state.rearStream);
     stopStream(state.frontStream);
-    stopStream(state.audioStream);
     state.rearStream = null;
     state.frontStream = null;
-    state.audioStream = null;
     state.dual = false;
-
-    let rear = null;
-    let front = null;
+    if (els.pip) els.pip.classList.add("hidden");
+    if (els.pipVideo) els.pipVideo.srcObject = null;
+    if (els.mainVideo) els.mainVideo.srcObject = null;
 
     const q = QUALITY[state.quality] || QUALITY.fhd;
-
-    try {
-      rear = await getStream({
+    const wantUser = facing === "user";
+    const attempts = [
+      {
         video: {
-          facingMode: { ideal: "environment" },
+          facingMode: { exact: wantUser ? "user" : "environment" },
           width: { ideal: q.width },
           height: { ideal: q.height },
           frameRate: { ideal: q.fps, max: 30 },
         },
         audio: false,
-      });
-    } catch (err) {
-      rear = await getStream({ video: true, audio: false });
-    }
-
-    try {
-      front = await getStream({
-        video: {
-          facingMode: { exact: "user" },
-          width: { ideal: Math.min(1280, q.width) },
-          height: { ideal: Math.min(720, q.height) },
-          frameRate: { ideal: q.fps, max: 30 },
-        },
+      },
+      {
+        video: { facingMode: wantUser ? "user" : "environment" },
         audio: false,
-      });
-    } catch {
+      },
+      { video: true, audio: false },
+    ];
+
+    let stream = null;
+    let lastErr = null;
+    for (const constraints of attempts) {
       try {
-        front = await getStream({
-          video: { facingMode: { ideal: "user" } },
-          audio: false,
-        });
-      } catch {
-        front = null;
+        stream = await getStream(constraints);
+        break;
+      } catch (err) {
+        lastErr = err;
       }
     }
+    if (!stream) {
+      throw new Error(lastErr && lastErr.message ? lastErr.message : "No se pudo encender la cámara.");
+    }
 
-    // If the second request killed the first (common on some phones), recover rear.
-    if (rear && rear.getVideoTracks().some((t) => t.readyState !== "live")) {
-      stopStream(rear);
+    const settings = stream.getVideoTracks()[0] && stream.getVideoTracks()[0].getSettings
+      ? stream.getVideoTracks()[0].getSettings()
+      : {};
+    if (settings.facingMode === "user" || settings.facingMode === "environment") {
+      state.mainIsRear = settings.facingMode !== "user";
+    } else {
+      state.mainIsRear = !wantUser;
+    }
+
+    state.rearStream = stream;
+    state.frontStream = null;
+
+    if (!state.audioStream || state.audioStream.getAudioTracks().every((t) => t.readyState !== "live")) {
       try {
-        rear = await getStream({
-          video: { facingMode: { ideal: "environment" } },
-          audio: false,
+        state.audioStream = await getStream({
+          audio: {
+            echoCancellation: { ideal: true },
+            noiseSuppression: { ideal: true },
+            autoGainControl: { ideal: true },
+          },
+          video: false,
         });
       } catch {
-        rear = null;
-      }
-    }
-
-    if (!rear && front) {
-      rear = front;
-      front = null;
-    }
-    if (!rear) {
-      throw new Error("No se pudo encender ninguna cámara. Revisa los permisos.");
-    }
-
-    // If both streams point to the same device, treat as single.
-    const rearId = rear.getVideoTracks()[0]?.getSettings?.().deviceId;
-    const frontId = front?.getVideoTracks()[0]?.getSettings?.().deviceId;
-    if (front && rearId && frontId && rearId === frontId) {
-      stopStream(front);
-      front = null;
-    }
-
-    state.rearStream = rear;
-    state.frontStream = front;
-    state.dual = Boolean(front);
-    state.mainIsRear = true;
-
-    try {
-      state.audioStream = await getStream({
-        audio: {
-          echoCancellation: { ideal: true },
-          noiseSuppression: { ideal: true },
-          autoGainControl: { ideal: true },
-          channelCount: { ideal: 1 },
-          sampleRate: { ideal: 48000 },
-        },
-        video: false,
-      });
-    } catch {
-      try {
-        state.audioStream = await getStream({ audio: true, video: false });
-      } catch {
-        state.audioStream = null;
+        try {
+          state.audioStream = await getStream({ audio: true, video: false });
+        } catch {
+          state.audioStream = null;
+        }
       }
     }
 
@@ -1076,32 +1067,18 @@ html.standalone #installCard { display: none !important; }
   }
 
   function attachVideos() {
-    const mainStream = state.mainIsRear ? state.rearStream : state.frontStream || state.rearStream;
-    const pipStream = state.mainIsRear ? state.frontStream : state.rearStream;
+    if (els.pip) els.pip.classList.add("hidden");
+    if (els.pipVideo) els.pipVideo.srcObject = null;
 
-    els.mainVideo.srcObject = mainStream;
+    els.mainVideo.srcObject = state.rearStream;
+    els.mainVideo.setAttribute("playsinline", "true");
+    els.mainVideo.setAttribute("webkit-playsinline", "true");
     els.mainVideo.muted = true;
     els.mainVideo.playsInline = true;
     els.mainVideo.autoplay = true;
     els.mainVideo.classList.toggle("mirrored", !state.mainIsRear);
-
     const playMain = els.mainVideo.play();
     if (playMain && playMain.catch) playMain.catch(() => {});
-
-    if (state.dual && pipStream) {
-      els.pip.classList.remove("hidden");
-      els.pipVideo.srcObject = pipStream;
-      els.pipVideo.muted = true;
-      els.pipVideo.playsInline = true;
-      els.pipVideo.autoplay = true;
-      els.pipVideo.classList.toggle("mirrored", state.mainIsRear);
-      const playPip = els.pipVideo.play();
-      if (playPip && playPip.catch) playPip.catch(() => {});
-      els.pipLabel.textContent = state.mainIsRear ? "Frontal" : "Trasera";
-    } else {
-      els.pip.classList.add("hidden");
-      els.pipVideo.srcObject = null;
-    }
   }
 
   function currentVideoSettings() {
@@ -1113,46 +1090,38 @@ html.standalone #installCard { display: none !important; }
   function updateStatus() {
     const s = currentVideoSettings();
     const res = s.width && s.height ? `${s.width}x${s.height}` : QUALITY[state.quality].label;
-    els.camStatus.textContent = state.dual ? `2 cámaras · ${res}` : `1 cámara · ${res}`;
+    const camName = state.mainIsRear ? "Trasera" : "Frontal";
+    els.camStatus.textContent = `${camName} · ${res}`;
     const hasMic = Boolean(state.audioStream && state.audioStream.getAudioTracks().length);
-    els.dualStatus.textContent = `${state.dual ? "Dual activo" : "Modo simple"} · ${hasMic ? "mic ON" : "sin mic"}`;
-    els.dualStatus.classList.toggle("live", state.dual);
+    els.dualStatus.textContent = `1 cámara · ${hasMic ? "mic ON" : "sin mic"}`;
+    els.dualStatus.classList.remove("live");
   }
 
-  function swapCameras() {
-    if (!state.frontStream && !state.rearStream) return;
-    if (!state.dual) {
-      // Single-camera flip: restart with opposite facingMode.
-      flipSingleCamera();
+  async function swapCameras() {
+    if (!state.rearStream && !state.frontStream) return;
+    if (state.recording) {
+      toast("No cambies de cámara mientras grabas.");
       return;
     }
-    state.mainIsRear = !state.mainIsRear;
-    attachVideos();
-    toast(state.mainIsRear ? "Principal: cámara trasera" : "Principal: cámara frontal");
-  }
-
-  async function flipSingleCamera() {
-    const wantUser = state.mainIsRear;
     try {
-      const q = QUALITY[state.quality] || QUALITY.fhd;
-      const next = await getStream({
-        video: {
-          facingMode: { ideal: wantUser ? "user" : "environment" },
-          width: { ideal: q.width },
-          height: { ideal: q.height },
-          frameRate: { ideal: q.fps, max: 30 },
-        },
-        audio: false,
-      });
-      stopStream(state.rearStream);
-      state.rearStream = next;
-      state.frontStream = null;
-      state.mainIsRear = !wantUser;
-      attachVideos();
+      await startSingleCamera(state.mainIsRear ? "user" : "environment");
       toast(state.mainIsRear ? "Cámara trasera" : "Cámara frontal");
     } catch (err) {
       toast("No se pudo cambiar de cámara.");
     }
+  }
+
+  function setSpeed(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return;
+    state.speed = Math.max(8, Math.min(160, n));
+    if (els.speedRange) els.speedRange.value = String(state.speed);
+    if (els.speedVal) els.speedVal.textContent = String(state.speed);
+    const dock = document.getElementById("dockSpeed");
+    const dockVal = document.getElementById("dockSpeedVal");
+    if (dock) dock.value = String(state.speed);
+    if (dockVal) dockVal.textContent = String(state.speed);
+    saveSettings();
   }
 
   function toggleScroll() {
@@ -1165,21 +1134,31 @@ html.standalone #installCard { display: none !important; }
     }
   }
 
+  function maxScroll() {
+    const body = els.prompter.querySelector(".prompter-body");
+    const boxH = body ? body.clientHeight : 180;
+    return Math.max(120, (els.prompterText.scrollHeight || 0) + boxH);
+  }
+
   function tickScroll(ts) {
     if (!state.scrolling) return;
     if (!state.lastTs) state.lastTs = ts;
-    const dt = Math.min(48, ts - state.lastTs);
+    const dt = Math.min(50, ts - state.lastTs) || 16;
     state.lastTs = ts;
-    const body = els.prompter.querySelector(".prompter-body");
-    const max = Math.max(0, els.prompterText.scrollHeight - body.clientHeight + 24);
-    state.scrollPx = Math.min(max, state.scrollPx + (state.speed / 16.6) * (dt / 16.6));
-    els.prompterText.style.transform = `translateY(${-state.scrollPx}px)`;
+    const pxPerSec = 10 + Number(state.speed) * 1.2;
+    state.scrollPx += pxPerSec * (dt / 1000);
+    const max = maxScroll();
     if (state.scrollPx >= max) {
+      state.scrollPx = max;
+      els.prompterText.style.webkitTransform = `translateY(${-state.scrollPx}px)`;
+      els.prompterText.style.transform = `translateY(${-state.scrollPx}px)`;
       state.scrolling = false;
       els.playBtn.textContent = "Leer";
       toast("Guion terminado");
       return;
     }
+    els.prompterText.style.webkitTransform = `translateY(${-state.scrollPx}px)`;
+    els.prompterText.style.transform = `translateY(${-state.scrollPx}px)`;
     requestAnimationFrame(tickScroll);
   }
 
@@ -1396,7 +1375,8 @@ html.standalone #installCard { display: none !important; }
     els.recTimer.classList.add("rec");
     tickRecTimer();
     requestWakeLock();
-    toast("Grabando hasta 10 min en alta calidad. El recuadro no sale en el video.");
+    if (!state.scrolling) toggleScroll();
+    toast("Grabando. El guion se mueve solo. Swap es frontal o trasera.");
   }
 
   function tickRecTimer() {
@@ -1601,11 +1581,7 @@ html.standalone #installCard { display: none !important; }
       try {
         await startCameras();
         els.gate.classList.add("hidden");
-        if (!state.dual) {
-          toast("Este teléfono solo permitió una cámara. Puedes cambiarla con el botón Swap.");
-        } else {
-          toast("Cámara dual lista. Escribe tu guion y pulsa Leer.");
-        }
+        toast("Lista. Swap cambia frontal/trasera. Pulsa Leer para mover el guion.");
       } catch (err) {
         toast(err.message || "No se pudieron usar las cámaras.");
         els.startBtn.disabled = false;
@@ -1644,27 +1620,17 @@ html.standalone #installCard { display: none !important; }
     document.getElementById("swapBtn").addEventListener("click", swapCameras);
     els.recBtn.addEventListener("click", toggleRecord);
 
-    document.querySelectorAll("[data-speed]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        state.speed = Number(btn.dataset.speed);
-        document.querySelectorAll("[data-speed]").forEach((b) => b.classList.toggle("active", b === btn));
-        els.speedRange.value = String(state.speed);
-        els.speedVal.textContent = String(state.speed);
-        saveSettings();
-      });
-    });
+    const dockSpeed = document.getElementById("dockSpeed");
+    if (dockSpeed) {
+      dockSpeed.addEventListener("input", () => setSpeed(dockSpeed.value));
+    }
+    if (els.speedRange) {
+      els.speedRange.addEventListener("input", () => setSpeed(els.speedRange.value));
+    }
 
     els.fontSize.addEventListener("input", () => {
       state.fontSize = Number(els.fontSize.value);
       applyPrompterStyle();
-      saveSettings();
-    });
-    els.speedRange.addEventListener("input", () => {
-      state.speed = Number(els.speedRange.value);
-      applyPrompterStyle();
-      document.querySelectorAll("[data-speed]").forEach((b) => {
-        b.classList.toggle("active", Number(b.dataset.speed) === state.speed);
-      });
       saveSettings();
     });
     els.opacityRange.addEventListener("input", () => {
@@ -1738,6 +1704,7 @@ html.standalone #installCard { display: none !important; }
 
   init();
 })();
+
 
   </script>
   <script>
