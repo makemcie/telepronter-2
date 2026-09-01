@@ -1045,6 +1045,28 @@ html.standalone #installCard { display: none !important; }
     };
     const attempts = wantUser
       ? [
+          {
+            video: {
+              facingMode: { exact: "user" },
+              width: { ideal: 1080 },
+              height: { ideal: 1920 },
+              aspectRatio: { ideal: 9 / 16 },
+            },
+            audio: audioOpts,
+          },
+          {
+            video: {
+              facingMode: { exact: "user" },
+              width: { ideal: 720 },
+              height: { ideal: 1280 },
+              aspectRatio: { ideal: 0.5625 },
+            },
+            audio: audioOpts,
+          },
+          {
+            video: { facingMode: { exact: "user" }, aspectRatio: { ideal: 0.75 } },
+            audio: audioOpts,
+          },
           { video: { facingMode: { exact: "user" } }, audio: audioOpts },
           { video: { facingMode: "user" }, audio: true },
           { video: true, audio: true },
@@ -1101,6 +1123,7 @@ html.standalone #installCard { display: none !important; }
     }
 
     if (!wantUser) await boostVideoQuality(stream);
+    if (wantUser) await forcePortraitTrack(stream);
     await relaxZoom(stream);
     attachVideos();
     updateStatus();
@@ -1121,6 +1144,25 @@ html.standalone #installCard { display: none !important; }
     }
   }
 
+  async function forcePortraitTrack(stream) {
+    const track = stream && stream.getVideoTracks()[0];
+    if (!track || !track.applyConstraints) return;
+    const tries = [
+      { width: 1080, height: 1920, aspectRatio: 9 / 16 },
+      { width: 720, height: 1280, aspectRatio: 9 / 16 },
+      { aspectRatio: 0.75 },
+    ];
+    for (const c of tries) {
+      try {
+        await track.applyConstraints(c);
+        const s = track.getSettings ? track.getSettings() : {};
+        if ((s.height || 0) > (s.width || 0)) break;
+      } catch {
+        /* next */
+      }
+    }
+  }
+
   async function relaxZoom(stream) {
     const track = stream && stream.getVideoTracks()[0];
     if (!track || !track.getCapabilities || !track.applyConstraints) return;
@@ -1137,32 +1179,15 @@ html.standalone #installCard { display: none !important; }
   function layoutPreview() {
     const v = els.mainVideo;
     if (!v) return;
-    const stage = v.parentElement;
-    if (!stage) return;
-    const sw = stage.clientWidth || window.innerWidth;
-    const sh = stage.clientHeight || window.innerHeight;
-    const vw = v.videoWidth || 0;
-    const vh = v.videoHeight || 0;
     v.style.position = "absolute";
-    v.style.inset = "auto";
+    v.style.inset = "0";
+    v.style.left = "0";
+    v.style.top = "0";
+    v.style.width = "100%";
+    v.style.height = "100%";
     v.style.margin = "0";
-    v.style.objectFit = "fill";
-    if (!vw || !vh) {
-      v.style.left = "0";
-      v.style.top = "0";
-      v.style.width = "100%";
-      v.style.height = "100%";
-      v.style.objectFit = "contain";
-      v.style.transform = state.mainIsRear ? "none" : "scaleX(-1)";
-      return;
-    }
-    const scale = Math.min(sw / vw, sh / vh);
-    const dw = Math.round(vw * scale);
-    const dh = Math.round(vh * scale);
-    v.style.width = dw + "px";
-    v.style.height = dh + "px";
-    v.style.left = Math.round((sw - dw) / 2) + "px";
-    v.style.top = Math.round((sh - dh) / 2) + "px";
+    v.style.objectFit = "cover";
+    v.style.objectPosition = "center center";
     v.style.transform = state.mainIsRear ? "none" : "scaleX(-1)";
     v.style.transformOrigin = "center center";
   }
@@ -1406,8 +1431,7 @@ html.standalone #installCard { display: none !important; }
     ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, w, h);
     if (!vw || !vh) return;
-    // Contain: toda la imagen, sin recorte/zoom. El archivo queda vertical.
-    const scale = Math.min(w / vw, h / vh);
+    const scale = Math.max(w / vw, h / vh);
     const dw = vw * scale;
     const dh = vh * scale;
     const dx = (w - dw) / 2;
@@ -1956,6 +1980,7 @@ html.standalone #installCard { display: none !important; }
 
   init();
 })();
+
 
 
 
